@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("admin")
+  createdAt    DateTime @default(now())
+}
+
+model Category {
+  id     String
+  branch String @default("main")
+  name   String
+  icon   String @default("📦")
+  color  String @default("#94a3b8")
+  items  Item[]
+
+  @@id([branch, id])
+  @@index([branch])
+}
+
+model Item {
+  id         String
+  branch     String     @default("main")
+  name       String
+  categoryId String
+  category   Category   @relation(fields: [branch, categoryId], references: [branch, id])
+  qty        Int        @default(0)
+  minQty     Int        @default(0)
+  location   String     @default("")
+  serial     String     @default("")
+  dateAdded  String     @default("")
+  notes      String     @default("")
+  assignedTo String?
+  loans      Loan[]
+  movements  Movement[]
+
+  @@id([branch, id])
+  @@index([branch])
+  @@index([branch, categoryId])
+}
+
+model Employee {
+  id     String
+  branch String @default("main")
+  name   String
+  area   String @default("")
+  email  String @default("")
+  loans  Loan[]
+
+  @@id([branch, id])
+  @@index([branch])
+}
+
+model Loan {
+  id           String
+  branch       String    @default("main")
+  itemId       String
+  item         Item      @relation(fields: [branch, itemId], references: [branch, id])
+  employeeId   String
+  employee     Employee  @relation(fields: [branch, employeeId], references: [branch, id])
+  dateOut      String
+  dateDue      String?
+  dateReturned String?
+  notes        String    @default("")
+
+  @@id([branch, id])
+  @@index([branch])
+}
+
+model Movement {
+  id     String
+  branch String @default("main")
+  itemId String
+  item   Item   @relation(fields: [branch, itemId], references: [branch, id])
+  type   String // in | out | loan | ret
+  qty    Int
+  date   String
+  notes  String @default("")
+
+  @@id([branch, id])
+  @@index([branch])
+}
+
+model Computer {
+  id                String
+  branch            String @default("main")
+  idNum             String @default("")
+  tipo              String @default("Laptop")
+  marca             String @default("")
+  modelo            String @default("")
+  serie             String
+  hostname          String @default("")
+  ram               String @default("")
+  rom               String @default("")
+  so                String @default("")
+  asignado          String @default("")
+  puesto            String @default("")
+  departamento      String @default("")
+  ubicacion         String @default("")
+  fechaCompra       String @default("")
+  garantia          String @default("")
+  factura           String @default("")
+  monitor           String @default("")
+  serieMonitor      String @default("")
+  garantiaMonitor   String @default("")
+  estado            String @default("ACTIVO") // ACTIVO|BAJA|PERDIDO|ROBADA
+  verificado        String @default("")
+  comentarios       String @default("")
+  assignmentHistory Json   @default("[]")
+
+  @@id([branch, id])
+  @@index([branch])
+  @@index([branch, estado])
+}
+
+/// Recursos TI (wifi, impresoras, camaras, …): esquema flexible por tipo
+model Recurso {
+  id     String
+  branch String @default("main")
+  type   String // clave de RECURSOS_SCHEMA
+  data   Json   // resto de campos (nombre, ip, password, …)
+
+  @@id([branch, type, id])
+  @@index([branch, type])
+}
+
+model Maintenance {
+  id          String   @id @default(uuid())
+  branch      String   @default("main")
+  equipoId    String   // El ID de la computadora o del ítem
+  tipoEquipo  String   // "Computer" o "Item"
+  fecha       DateTime @default(now())
+  tipo        String   // "PREVENTIVO", "CORRECTIVO", "ACTUALIZACION"
+  descripcion String
+  tecnico     String   @default("")
+  costo       Float?
+  proximaFch  DateTime? // Para agendar el siguiente mantenimiento
+
+  @@index([branch, equipoId])
+}
+
+model Baja {
+  id          String   @id @default(uuid())
+  branch      String   @default("main")
+  equipoId    String   
+  tipoEquipo  String   // "Computer" o "Item"
+  fecha       DateTime @default(now())
+  motivo      String   // "OBSOLETO", "DAÑO IRREPARABLE", "ROBO"
+  autorizadoPor String @default("")
+  destinoFinal String  // "RECICLAJE", "DONACION", "DESTRUCCION"
+  formatoUrl  String   @default("") // Link al PDF/documento firmado
+  notas       String   @default("")
+
+  @@index([branch, equipoId])
+}

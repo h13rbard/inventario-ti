@@ -1137,6 +1137,48 @@ Views.deleteCategory = function (catId) {
 };
 
 // ============================================================
+// API HELPER — llamadas autenticadas al backend
+// ============================================================
+const Api = {
+  branch() { return sessionStorage.getItem('ti_branch') || 'main'; },
+  token() { return sessionStorage.getItem('ti_token') || ''; },
+
+  /** Convierte input type=date (YYYY-MM-DD) a ISO para Prisma DateTime */
+  toIsoDate(dateStr) {
+    if (!dateStr) return null;
+    if (dateStr.includes('T')) return new Date(dateStr).toISOString();
+    return new Date(dateStr + 'T12:00:00.000Z').toISOString();
+  },
+
+  async get(path) {
+    const sep = path.includes('?') ? '&' : '?';
+    const res = await fetch(`${path}${sep}branch=${encodeURIComponent(this.branch())}&_=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { Authorization: 'Bearer ' + this.token() }
+    });
+    return res.json();
+  },
+
+  async post(path, body) {
+    const res = await fetch(`${path}?branch=${encodeURIComponent(this.branch())}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + this.token()
+      },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json().catch(() => ({ ok: false, error: 'Respuesta inválida' }));
+    if (res.status === 401) {
+      alert('🔒 Tu sesión ha expirado. Inicia sesión nuevamente.');
+      sessionStorage.removeItem('ti_auth');
+      location.reload();
+    }
+    return json;
+  }
+};
+
+// ============================================================
 // COMPUTERS MODULE — Equipos de Cómputo
 // ============================================================
 const COMPUTER_STATUS = {
@@ -1215,6 +1257,7 @@ Views.computers = function () {
                        <td><span class="stock-badge ${st.cls}">${st.label}</span></td>
                        <td>
                          <div class="action-btns">
+                           <button class="btn-icon" title="Detalle"     onclick="Views.showComputerDetail('${c.id}')">🖥️</button>
                            <button class="btn-icon" title="Ver QR"      onclick="Views.showComputerQR('${c.id}')">🔲</button>
                            <button class="btn-icon" title="Historial"    onclick="Views.showComputerHistory('${c.id}')" style="position:relative">
                              📋${hasHistory ? '<span style="position:absolute;top:-3px;right:-3px;background:var(--accent);color:#fff;border-radius:50%;font-size:.55rem;padding:1px 3px;line-height:1">' + c.assignmentHistory.length + '</span>' : ''}
@@ -1459,6 +1502,257 @@ Views.deleteComputer = function (id) {
   Storage.save(db);
   showToast('Equipo eliminado', 'info');
   Views.computers();
+};
+
+function fmtApiDate(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch { return iso; }
+}
+
+Views.showComputerDetail = async function (id) {
+  const db = Storage.get();
+  const comp = db.computers.find(c => c.id === id);
+  if (!comp) return;
+  const st = COMPUTER_STATUS[comp.estado] || { label: comp.estado || '—', cls: '' };
+  const isBaja = comp.estado === 'BAJA';
+
+  Modal.open(
+    `🖥️ ${comp.hostname || comp.serie}`,
+    `<div class="fade-in">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px">
+        <span class="stock-badge ${st.cls}">${st.label}</span>
+        <span style="font-size:.82rem;color:var(--text-muted)">${Utils.esc(comp.marca || '')} ${Utils.esc(comp.modelo || '')} · S/N ${Utils.esc(comp.serie || '—')}</span>
+      </div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-bottom:16px;font-size:.82rem">
+        <div><span style="color:var(--text-muted)">Asignado</span><br><strong>${Utils.esc(comp.asignado || '—')}</strong></div>
+        <div><span style="color:var(--text-muted)">Puesto</span><br><strong>${Utils.esc(comp.puesto || '—')}</strong></div>
+        <div><span style="color:var(--text-muted)">Departamento</span><br><strong>${Utils.esc(comp.departamento || '—')}</strong></div>
+        <div><span style="color:var(--text-muted)">Ubicación</span><br><strong>${Utils.esc(comp.ubicacion || '—')}</strong></div>
+      </div>
+      <div class="form-actions" style="justify-content:flex-start;margin-bottom:18px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btnRegMaint" ${isBaja ? 'disabled title="Equipo dado de baja"' : ''}>🛠️ Registrar Mantenimiento</button>
+        <button class="btn btn-danger" id="btnDarBaja" ${isBaja ? 'disabled title="Ya está de baja"' : ''}>⛔ Dar de Baja</button>
+        <button class="btn btn-secondary" onclick="Views.showComputerForm('${comp.id}')">✏️ Editar</button>
+      </div>
+      <div class="section-title" style="margin-bottom:8px">🛠️ Historial de mantenimientos</div>
+      <div id="maintHistoryBox" style="max-height:240px;overflow-y:auto">
+        <div style="text-align:center;color:var(--text-muted);padding:20px">Cargando…</div>
+      </div>
+    </div>`,
+    () => {
+      document.getElementById('btnRegMaint')?.addEventListener('click', () => Views.showMaintenanceForm(comp.id));
+      document.getElementById('btnDarBaja')?.addEventListener('click', () => Views.showBajaForm(comp.id));
+      Views._loadMaintenanceHistory(comp.id);
+    }
+  );
+};
+
+Views._loadMaintenanceHistory = async function (equipoId) {
+  const box = document.getElementById('maintHistoryBox');
+  if (!box) return;
+  try {
+    if (!Storage._serverMode) {
+      box.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:16px">Historial disponible solo con servidor conectado.</div>`;
+      return;
+    }
+    const json = await Api.get(`/api/maintenance?equipoId=${encodeURIComponent(equipoId)}&tipoEquipo=Computer`);
+    if (!json.ok) throw new Error(json.error || 'Error al cargar');
+    const rows = json.data || [];
+    if (rows.length === 0) {
+      box.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:16px">Sin mantenimientos registrados.</div>`;
+      return;
+    }
+    box.innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Fecha</th><th>Tipo</th><th>Descripción</th><th>Técnico</th><th>Costo</th><th>Próxima</th>
+          </tr></thead>
+          <tbody>
+            ${rows.map(m => `<tr>
+              <td style="white-space:nowrap">${fmtApiDate(m.fecha)}</td>
+              <td><span class="stock-badge status-warn">${Utils.esc(m.tipo)}</span></td>
+              <td>${Utils.esc(m.descripcion)}</td>
+              <td>${Utils.esc(m.tecnico || '—')}</td>
+              <td>${m.costo != null ? '$' + Number(m.costo).toFixed(2) : '—'}</td>
+              <td>${fmtApiDate(m.proximaFch)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    box.innerHTML = `<div style="text-align:center;color:var(--danger);padding:16px">${Utils.esc(e.message || 'No se pudo cargar el historial')}</div>`;
+  }
+};
+
+Views.showMaintenanceForm = function (computerId) {
+  const db = Storage.get();
+  const comp = db.computers.find(c => c.id === computerId);
+  if (!comp) return;
+
+  Modal.open(
+    `🛠️ Mantenimiento — ${comp.hostname || comp.serie}`,
+    `<div class="form-grid">
+      <div class="form-group">
+        <label class="form-label">Fecha *</label>
+        <input class="form-input" type="date" id="mFecha" value="${Utils.today()}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Tipo *</label>
+        <select class="form-select" id="mTipo">
+          <option value="PREVENTIVO">Preventivo</option>
+          <option value="CORRECTIVO">Correctivo</option>
+          <option value="ACTUALIZACION">Actualización</option>
+        </select>
+      </div>
+      <div class="form-group form-full">
+        <label class="form-label">Descripción *</label>
+        <textarea class="form-textarea" id="mDesc" placeholder="Trabajo realizado, piezas cambiadas…"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Técnico</label>
+        <input class="form-input" id="mTecnico" placeholder="Nombre del técnico" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Costo</label>
+        <input class="form-input" type="number" min="0" step="0.01" id="mCosto" placeholder="0.00" />
+      </div>
+      <div class="form-group form-full">
+        <label class="form-label">Próximo mantenimiento</label>
+        <input class="form-input" type="date" id="mProxima" />
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" id="mCancel">Cancelar</button>
+      <button class="btn btn-primary" id="mSave">💾 Guardar</button>
+    </div>`,
+    () => {
+      document.getElementById('mCancel').addEventListener('click', () => Views.showComputerDetail(computerId));
+      document.getElementById('mSave').addEventListener('click', async () => {
+        const fecha = document.getElementById('mFecha').value;
+        const tipo = document.getElementById('mTipo').value;
+        const descripcion = document.getElementById('mDesc').value.trim();
+        if (!fecha || !descripcion) { showToast('Fecha y descripción son obligatorias', 'error'); return; }
+        if (!Storage._serverMode) { showToast('Se requiere conexión al servidor', 'error'); return; }
+
+        const btn = document.getElementById('mSave');
+        btn.disabled = true;
+        try {
+          const json = await Api.post('/api/maintenance', {
+            equipoId: computerId,
+            tipoEquipo: 'Computer',
+            fecha: Api.toIsoDate(fecha),
+            tipo,
+            descripcion,
+            tecnico: document.getElementById('mTecnico').value.trim(),
+            costo: document.getElementById('mCosto').value || null,
+            proximaFch: Api.toIsoDate(document.getElementById('mProxima').value),
+          });
+          if (!json.ok) throw new Error(json.error || 'Error al guardar');
+          showToast('Mantenimiento registrado ✅', 'success');
+          Views.showComputerDetail(computerId);
+        } catch (e) {
+          showToast(e.message || 'Error al guardar', 'error');
+          btn.disabled = false;
+        }
+      });
+    }
+  );
+};
+
+Views.showBajaForm = function (computerId) {
+  const db = Storage.get();
+  const comp = db.computers.find(c => c.id === computerId);
+  if (!comp) return;
+  if (comp.estado === 'BAJA') { showToast('El equipo ya está de baja', 'error'); return; }
+
+  Modal.open(
+    `⛔ Dar de Baja — ${comp.hostname || comp.serie}`,
+    `<p style="font-size:.82rem;color:var(--text-muted);margin:0 0 12px">
+      Esta acción marcará el equipo como <strong>BAJA</strong> en el inventario.
+    </p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label class="form-label">Fecha *</label>
+        <input class="form-input" type="date" id="bFecha" value="${Utils.today()}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Motivo *</label>
+        <select class="form-select" id="bMotivo">
+          <option value="OBSOLETO">Obsoleto</option>
+          <option value="DAÑO IRREPARABLE">Daño irreparable</option>
+          <option value="ROBO">Robo</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Destino final *</label>
+        <select class="form-select" id="bDestino">
+          <option value="RECICLAJE">Reciclaje</option>
+          <option value="DONACION">Donación</option>
+          <option value="DESTRUCCION">Destrucción</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Autorizado por</label>
+        <input class="form-input" id="bAuth" placeholder="Nombre de quien autoriza" />
+      </div>
+      <div class="form-group form-full">
+        <label class="form-label">URL / documento firmado</label>
+        <input class="form-input" id="bUrl" placeholder="https://… o ruta del PDF" />
+      </div>
+      <div class="form-group form-full">
+        <label class="form-label">Notas</label>
+        <textarea class="form-textarea" id="bNotas" placeholder="Observaciones adicionales…"></textarea>
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-secondary" id="bCancel">Cancelar</button>
+      <button class="btn btn-danger" id="bSave">⛔ Confirmar baja</button>
+    </div>`,
+    () => {
+      document.getElementById('bCancel').addEventListener('click', () => Views.showComputerDetail(computerId));
+      document.getElementById('bSave').addEventListener('click', async () => {
+        const fecha = document.getElementById('bFecha').value;
+        const motivo = document.getElementById('bMotivo').value;
+        const destinoFinal = document.getElementById('bDestino').value;
+        if (!fecha || !motivo || !destinoFinal) { showToast('Completa los campos obligatorios', 'error'); return; }
+        if (!confirm('¿Confirmas dar de baja este equipo?')) return;
+        if (!Storage._serverMode) { showToast('Se requiere conexión al servidor', 'error'); return; }
+
+        const btn = document.getElementById('bSave');
+        btn.disabled = true;
+        try {
+          const json = await Api.post('/api/bajas', {
+            equipoId: computerId,
+            tipoEquipo: 'Computer',
+            fecha: Api.toIsoDate(fecha),
+            motivo,
+            destinoFinal,
+            autorizadoPor: document.getElementById('bAuth').value.trim(),
+            formatoUrl: document.getElementById('bUrl').value.trim(),
+            notas: document.getElementById('bNotas').value.trim(),
+          });
+          if (!json.ok) throw new Error(json.error || 'Error al registrar baja');
+
+          const db2 = Storage.get();
+          const idx = db2.computers.findIndex(c => c.id === computerId);
+          if (idx !== -1) {
+            db2.computers[idx] = { ...db2.computers[idx], estado: 'BAJA' };
+            Storage.save(db2);
+          }
+          showToast('Equipo dado de baja ✅', 'success');
+          Views.computers();
+          Views.showComputerDetail(computerId);
+        } catch (e) {
+          showToast(e.message || 'Error al registrar baja', 'error');
+          btn.disabled = false;
+        }
+      });
+    }
+  );
 };
 
 Views.showComputerHistory = function (id) {
@@ -2105,7 +2399,7 @@ async function initApp() {
 
   const branchNameElement = document.getElementById('sidebarBranchName');
   if (branchNameElement) {
-    branchNameElement.textContent = 'Demo Interactiva';
+    branchNameElement.textContent = 'Version 1.0';
   }
 
   // Register views
